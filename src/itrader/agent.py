@@ -23,6 +23,7 @@ class CycleReport:
     rejected: tuple[str, ...]
     cash: float
     equity: float
+    prices: dict[str, float]
 
 
 class TradingAgent:
@@ -41,6 +42,7 @@ class TradingAgent:
         self.strategy = strategy
         self.state_path = state_path
         self.processed_article_ids: set[str] = set()
+        self.last_prices: dict[str, float] = {}
 
     def run_cycle(self, *, now: datetime | None = None) -> CycleReport:
         now = now or datetime.now(timezone.utc)
@@ -50,6 +52,7 @@ class TradingAgent:
         ]
         quotes = self.market_data.get_quotes(list(self.strategy.watchlist))
         prices = {symbol: quote.price for symbol, quote in quotes.items()}
+        self.last_prices.update(prices)
         before = self.broker.snapshot(prices)
         intents = self.strategy.evaluate(new_articles, quotes, before, now=now)
 
@@ -91,6 +94,7 @@ class TradingAgent:
             rejected=tuple(rejected),
             cash=after.cash,
             equity=after.equity,
+            prices=dict(self.last_prices),
         )
 
     def _size_order(self, symbol: str, side: Side, quote: Quote, prices: dict[str, float]) -> int:
@@ -117,6 +121,7 @@ class TradingAgent:
             "schema_version": 1,
             "broker": self.broker.to_dict(),
             "processed_article_ids": sorted(self.processed_article_ids),
+            "last_prices": self.last_prices,
         }
         with tempfile.NamedTemporaryFile(
             "w",
@@ -150,5 +155,8 @@ class TradingAgent:
             state_path=state_path,
         )
         agent.processed_article_ids = set(payload.get("processed_article_ids", []))
+        agent.last_prices = {
+            str(symbol): float(price)
+            for symbol, price in dict(payload.get("last_prices", {})).items()
+        }
         return agent
-

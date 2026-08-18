@@ -12,10 +12,10 @@ license = {text = "MIT"}
 
 [project.scripts]
 itrader = "itrader.cli:main"
+itrader-gui = "itrader.gui:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-

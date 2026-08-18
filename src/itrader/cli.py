@@ -35,6 +35,12 @@ def _parser() -> argparse.ArgumentParser:
 
     demo = subparsers.add_parser("demo", help="run a deterministic offline demonstration")
     demo.add_argument("--initial-cash", type=float, default=100_000)
+
+    gui = subparsers.add_parser("gui", help="open the paper-trading desktop dashboard")
+    gui.add_argument("--initial-cash", type=float, default=100_000)
+    gui.add_argument("--state", type=Path, default=Path("var/paper-state.json"))
+    gui.add_argument("--interval", type=int, default=300, help="auto-refresh interval in seconds")
+    gui.add_argument("--news-query", default="US technology stocks when:1d")
     return parser
 
 
@@ -121,6 +127,16 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.command == "demo":
         return _run_demo(args)
+    if args.command == "gui":
+        from .gui import launch_gui
+
+        launch_gui(
+            initial_cash=args.initial_cash,
+            state_path=args.state,
+            interval_seconds=args.interval,
+            news_query=args.news_query,
+        )
+        return 0
     return _run_live(args)
 
 
