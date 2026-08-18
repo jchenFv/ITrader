@@ -5,12 +5,11 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import tempfile
-from typing import Sequence
 
 from .broker import OrderRejected, SimulatedBroker
-from .models import NewsArticle, Quote, Side, Trade
+from .models import Quote, ResearchReport, Side, Trade
 from .providers import MarketDataProvider, NewsProvider
-from .strategy import NewsMomentumStrategy
+from .strategy import TradingStrategy
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +23,9 @@ class CycleReport:
     cash: float
     equity: float
     prices: dict[str, float]
+    strategy_name: str
+    strategy_error: str | None
+    research: ResearchReport | None
 
 
 class TradingAgent:
@@ -33,7 +35,7 @@ class TradingAgent:
         broker: SimulatedBroker,
         news_provider: NewsProvider,
         market_data: MarketDataProvider,
-        strategy: NewsMomentumStrategy,
+        strategy: TradingStrategy,
         state_path: Path | None = None,
     ) -> None:
         self.broker = broker
@@ -43,6 +45,7 @@ class TradingAgent:
         self.state_path = state_path
         self.processed_article_ids: set[str] = set()
         self.last_prices: dict[str, float] = {}
+        self.last_research: ResearchReport | None = None
 
     def run_cycle(self, *, now: datetime | None = None) -> CycleReport:
         now = now or datetime.now(timezone.utc)
@@ -56,6 +59,10 @@ class TradingAgent:
         valuation_prices = dict(self.last_prices)
         before = self.broker.snapshot(valuation_prices)
         intents = self.strategy.evaluate(new_articles, quotes, before, now=now)
+        cycle_research = getattr(self.strategy, "last_research", None)
+        if cycle_research is not None:
+            self.last_research = cycle_research
+        strategy_error = getattr(self.strategy, "last_error", None)
 
         executed: list[Trade] = []
         rejected: list[str] = []
@@ -96,6 +103,9 @@ class TradingAgent:
             cash=after.cash,
             equity=after.equity,
             prices=valuation_prices,
+            strategy_name=self.strategy.name,
+            strategy_error=strategy_error,
+            research=self.last_research,
         )
 
     def _size_order(self, symbol: str, side: Side, quote: Quote, prices: dict[str, float]) -> int:
@@ -123,6 +133,7 @@ class TradingAgent:
             "broker": self.broker.to_dict(),
             "processed_article_ids": sorted(self.processed_article_ids),
             "last_prices": self.last_prices,
+            "last_research": self.last_research.to_dict() if self.last_research else None,
         }
         with tempfile.NamedTemporaryFile(
             "w",
@@ -143,7 +154,7 @@ class TradingAgent:
         *,
         news_provider: NewsProvider,
         market_data: MarketDataProvider,
-        strategy: NewsMomentumStrategy,
+        strategy: TradingStrategy,
     ) -> "TradingAgent":
         payload = json.loads(state_path.read_text(encoding="utf-8"))
         if payload.get("schema_version") != 1:
@@ -160,4 +171,7 @@ class TradingAgent:
             str(symbol): float(price)
             for symbol, price in dict(payload.get("last_prices", {})).items()
         }
+        research_payload = payload.get("last_research")
+        if research_payload:
+            agent.last_research = ResearchReport.from_dict(research_payload)
         return agent

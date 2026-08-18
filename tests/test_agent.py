@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 from itrader.agent import TradingAgent
 from itrader.broker import SimulatedBroker
-from itrader.models import NewsArticle, Side
+from itrader.models import NewsArticle, ResearchReport, Side
 from itrader.providers import StaticMarketDataProvider, StaticNewsProvider
 from itrader.strategy import NewsMomentumStrategy
 
@@ -88,6 +88,14 @@ class TradingAgentTests(unittest.TestCase):
             path = Path(directory) / "state.json"
             agent = self._agent(path)
             agent.run_cycle(now=self.now)
+            agent.last_research = ResearchReport(
+                generated_at=self.now,
+                model="test-model",
+                market_summary="test summary",
+                industry_views=(),
+                recommendations=(),
+            )
+            agent.save_state()
             payload = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(payload["schema_version"], 1)
 
@@ -98,6 +106,7 @@ class TradingAgentTests(unittest.TestCase):
                 strategy=NewsMomentumStrategy(watchlist={"NVDA": ("nvidia",)}),
             )
             self.assertEqual(loaded.broker.positions["NVDA"].quantity, 10)
+            self.assertEqual(loaded.last_research.model, "test-model")
             self.assertEqual(len(loaded.run_cycle(now=self.now).trades), 0)
 
 

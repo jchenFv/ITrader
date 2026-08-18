@@ -3,17 +3,20 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from datetime import datetime
+import os
 from pathlib import Path
 import queue
+import re
 import threading
 import tkinter as tk
 from tkinter import messagebox, ttk
+import webbrowser
 
 from .agent import CycleReport, TradingAgent
 from .broker import SimulatedBroker
+from .llm_strategy import DEFAULT_API_BASE, DEFAULT_LLM_MODEL, build_strategy
 from .models import Side, Trade
-from .providers import GoogleNewsRssProvider, YahooFinanceMarketData
-from .strategy import NewsMomentumStrategy
+from .providers import BestEffortNewsProvider, GoogleNewsRssProvider, YahooFinanceMarketData
 
 
 BG = "#08111f"
@@ -76,11 +79,24 @@ def _short_time(value: datetime) -> str:
 
 
 def create_live_agent(
-    *, initial_cash: float, state_path: Path, news_query: str
+    *,
+    initial_cash: float,
+    state_path: Path,
+    news_query: str,
+    strategy_mode: str = "auto",
+    llm_model: str = DEFAULT_LLM_MODEL,
+    llm_confidence: float = 0.70,
+    api_base: str = DEFAULT_API_BASE,
 ) -> TradingAgent:
-    news = GoogleNewsRssProvider(query=news_query)
+    strategy = build_strategy(
+        strategy_mode,
+        model=llm_model,
+        api_base=api_base,
+        confidence_threshold=llm_confidence,
+    )
+    rss = GoogleNewsRssProvider(query=news_query)
+    news = BestEffortNewsProvider(rss) if getattr(strategy, "uses_web_research", False) else rss
     market = YahooFinanceMarketData()
-    strategy = NewsMomentumStrategy()
     if state_path.exists():
         return TradingAgent.load(
             state_path,
@@ -120,6 +136,7 @@ class TradingDashboard(tk.Tk):
         self.pnl_var = tk.StringVar()
         self.status_var = tk.StringVar(value="就绪 · 等待运行模拟周期")
         self.news_var = tk.StringVar(value="本次会话尚未运行")
+        self.strategy_var = tk.StringVar(value=f"策略 · {self.agent.strategy.name}")
         self.auto_var = tk.BooleanVar(value=False)
 
         self._configure_styles()
@@ -169,6 +186,15 @@ class TradingDashboard(tk.Tk):
             font=("Segoe UI", 10),
         )
         style.map("TCheckbutton", background=[("active", BG)])
+        style.configure(
+            "Secondary.TButton",
+            background=PANEL_ALT,
+            foreground=TEXT,
+            padding=(12, 9),
+            borderwidth=0,
+            font=("Segoe UI", 9),
+        )
+        style.map("Secondary.TButton", background=[("active", "#214469")])
 
     def _build_layout(self) -> None:
         outer = tk.Frame(self, bg=BG)
@@ -205,6 +231,22 @@ class TradingDashboard(tk.Tk):
             font=("Segoe UI Semibold", 9),
         )
         paper_badge.pack(side="left", padx=(0, 14))
+        tk.Label(
+            controls,
+            textvariable=self.strategy_var,
+            bg=PANEL_ALT,
+            fg=ACCENT,
+            padx=10,
+            pady=8,
+            font=("Segoe UI", 9),
+        ).pack(side="left", padx=(0, 10))
+        self.research_button = ttk.Button(
+            controls,
+            text="查看 LLM 研究",
+            style="Secondary.TButton",
+            command=self._show_research,
+        )
+        self.research_button.pack(side="left", padx=(0, 10))
         ttk.Checkbutton(
             controls,
             text=f"自动 {self.interval_seconds} 秒",
@@ -350,6 +392,10 @@ class TradingDashboard(tk.Tk):
         self.equity_var.set(_money(snapshot.equity))
         self.pnl_var.set(_money(pnl, signed=True))
         self.pnl_value_label.configure(fg=GREEN if pnl >= 0 else RED)
+        self.strategy_var.set(f"策略 · {self.agent.strategy.name}")
+        self.research_button.configure(
+            state="normal" if self.agent.last_research else "disabled"
+        )
 
         self.positions_tree.delete(*self.positions_tree.get_children())
         rows = build_position_rows(self.agent.broker, prices)
@@ -395,6 +441,49 @@ class TradingDashboard(tk.Tk):
             tags=(tag,),
         )
 
+    def _show_research(self) -> None:
+        report = self.agent.last_research
+        if report is None:
+            messagebox.showinfo("LLM 行业研究", "尚无 LLM 研究报告。", parent=self)
+            return
+        dialog = tk.Toplevel(self)
+        dialog.title("ITrader · LLM 行业研究")
+        dialog.geometry("900x700")
+        dialog.minsize(680, 480)
+        dialog.configure(bg=BG)
+        text = tk.Text(
+            dialog,
+            bg=PANEL,
+            fg=TEXT,
+            insertbackground=TEXT,
+            selectbackground="#214469",
+            relief="flat",
+            wrap="word",
+            padx=20,
+            pady=18,
+            font=("Segoe UI", 10),
+        )
+        scrollbar = ttk.Scrollbar(dialog, orient="vertical", command=text.yview)
+        text.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        text.pack(side="left", fill="both", expand=True, padx=16, pady=16)
+        rendered = report.render_text()
+        text.insert("1.0", rendered)
+        text.tag_configure("research_url", foreground=ACCENT, underline=True)
+        for match in re.finditer(r"https?://[^\s]+", rendered):
+            start = f"1.0+{match.start()}c"
+            end = f"1.0+{match.end()}c"
+            text.tag_add("research_url", start, end)
+            url = match.group(0)
+            tag_name = f"url_{match.start()}"
+            text.tag_add(tag_name, start, end)
+            text.tag_bind(
+                tag_name,
+                "<Button-1>",
+                lambda _event, target=url: webbrowser.open_new_tab(target),
+            )
+        text.configure(state="disabled")
+
     def run_cycle(self) -> None:
         if self.worker and self.worker.is_alive():
             return
@@ -430,10 +519,13 @@ class TradingDashboard(tk.Tk):
             f"更新于 {_short_time(report.timestamp)} · {len(report.trades)} 笔成交 · 权益 {_money(report.equity)}"
         )
         self.news_var.set(
-            f"新闻 {report.new_articles}/{report.articles_seen} 条新增 · 行情 {report.quotes_received} 只"
+            f"新闻 {report.new_articles}/{report.articles_seen} 条新增 · 行情 {report.quotes_received} 只 · {report.strategy_name}"
         )
         if report.rejected:
             self.status_var.set(self.status_var.get() + f" · 跳过 {len(report.rejected)} 个信号")
+        if report.strategy_error:
+            self.status_dot.configure(fg=AMBER)
+            self.status_var.set(self.status_var.get() + " · LLM 失败，已使用规则回退")
         self._schedule_auto()
 
     def _cycle_failed(self, error: BaseException) -> None:
@@ -472,11 +564,19 @@ def launch_gui(
     state_path: Path = Path("var/paper-state.json"),
     interval_seconds: int = 300,
     news_query: str = "US technology stocks when:1d",
+    strategy_mode: str = "auto",
+    llm_model: str = DEFAULT_LLM_MODEL,
+    llm_confidence: float = 0.70,
+    api_base: str = DEFAULT_API_BASE,
 ) -> None:
     agent = create_live_agent(
         initial_cash=initial_cash,
         state_path=state_path,
         news_query=news_query,
+        strategy_mode=strategy_mode,
+        llm_model=llm_model,
+        llm_confidence=llm_confidence,
+        api_base=api_base,
     )
     app = TradingDashboard(agent, interval_seconds=interval_seconds)
     app.mainloop()
@@ -488,13 +588,28 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--state", type=Path, default=Path("var/paper-state.json"))
     parser.add_argument("--interval", type=int, default=300)
     parser.add_argument("--news-query", default="US technology stocks when:1d")
-    args = parser.parse_args(argv)
-    launch_gui(
-        initial_cash=args.initial_cash,
-        state_path=args.state,
-        interval_seconds=args.interval,
-        news_query=args.news_query,
+    parser.add_argument("--strategy", choices=("auto", "llm", "rules"), default="auto")
+    parser.add_argument(
+        "--llm-model", default=os.getenv("ITRADER_LLM_MODEL", DEFAULT_LLM_MODEL)
     )
+    parser.add_argument("--llm-confidence", type=float, default=0.70)
+    parser.add_argument(
+        "--openai-api-base", default=os.getenv("OPENAI_BASE_URL", DEFAULT_API_BASE)
+    )
+    args = parser.parse_args(argv)
+    try:
+        launch_gui(
+            initial_cash=args.initial_cash,
+            state_path=args.state,
+            interval_seconds=args.interval,
+            news_query=args.news_query,
+            strategy_mode=args.strategy,
+            llm_model=args.llm_model,
+            llm_confidence=args.llm_confidence,
+            api_base=args.openai_api_base,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
     return 0
 
 
