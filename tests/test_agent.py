@@ -55,6 +55,34 @@ class TradingAgentTests(unittest.TestCase):
         self.assertEqual(report.trades[0].side, Side.SELL)
         self.assertNotIn("NVDA", agent.broker.positions)
 
+    def test_partial_quotes_use_cached_prices_for_valuation_and_risk_sizing(self) -> None:
+        broker = SimulatedBroker(10_000, slippage_bps=0)
+        broker.submit_market_order("NVDA", Side.BUY, 10, 100, reason="seed")
+        apple_news = NewsArticle(
+            "Apple beats estimates with record growth",
+            source="test",
+            url="test://apple-positive",
+            published_at=self.now,
+        )
+        agent = TradingAgent(
+            broker=broker,
+            news_provider=StaticNewsProvider([apple_news]),
+            # This cycle has an AAPL quote but is missing the existing NVDA holding.
+            market_data=StaticMarketDataProvider({"AAPL": 100}),
+            strategy=NewsMomentumStrategy(
+                watchlist={"NVDA": ("nvidia",), "AAPL": ("apple",)}
+            ),
+        )
+        agent.last_prices = {"NVDA": 200}
+
+        report = agent.run_cycle(now=self.now)
+
+        self.assertEqual(report.prices, {"NVDA": 200, "AAPL": 100})
+        self.assertEqual(report.trades[0].symbol, "AAPL")
+        self.assertEqual(report.trades[0].quantity, 11)  # 10% of $11,000 equity
+        self.assertEqual(report.equity, 11_000)
+        self.assertEqual(broker.snapshot(report.prices).equity, report.equity)
+
     def test_state_round_trip(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "state.json"
