@@ -53,7 +53,8 @@ class TradingAgent:
         quotes = self.market_data.get_quotes(list(self.strategy.watchlist))
         prices = {symbol: quote.price for symbol, quote in quotes.items()}
         self.last_prices.update(prices)
-        before = self.broker.snapshot(prices)
+        valuation_prices = dict(self.last_prices)
+        before = self.broker.snapshot(valuation_prices)
         intents = self.strategy.evaluate(new_articles, quotes, before, now=now)
 
         executed: list[Trade] = []
@@ -63,7 +64,7 @@ class TradingAgent:
             if quote is None:
                 rejected.append(f"{intent.symbol}: quote unavailable")
                 continue
-            quantity = self._size_order(intent.symbol, intent.side, quote, prices)
+            quantity = self._size_order(intent.symbol, intent.side, quote, valuation_prices)
             if quantity <= 0:
                 rejected.append(f"{intent.symbol} {intent.side}: risk limits produced zero shares")
                 continue
@@ -84,7 +85,7 @@ class TradingAgent:
         self.processed_article_ids.update(article.article_id for article in new_articles)
         if self.state_path:
             self.save_state()
-        after = self.broker.snapshot(prices)
+        after = self.broker.snapshot(valuation_prices)
         return CycleReport(
             timestamp=now,
             articles_seen=len(articles),
@@ -94,7 +95,7 @@ class TradingAgent:
             rejected=tuple(rejected),
             cash=after.cash,
             equity=after.equity,
-            prices=dict(self.last_prices),
+            prices=valuation_prices,
         )
 
     def _size_order(self, symbol: str, side: Side, quote: Quote, prices: dict[str, float]) -> int:
