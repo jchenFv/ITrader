@@ -24,6 +24,7 @@ class CycleReport:
     equity: float
     prices: dict[str, float]
     strategy_name: str
+    news_error: str | None
     strategy_error: str | None
     research: ResearchReport | None
 
@@ -50,6 +51,7 @@ class TradingAgent:
     def run_cycle(self, *, now: datetime | None = None) -> CycleReport:
         now = now or datetime.now(timezone.utc)
         articles = self.news_provider.fetch()
+        news_error = getattr(self.news_provider, "last_error", None)
         new_articles = [
             article for article in articles if article.article_id not in self.processed_article_ids
         ]
@@ -104,6 +106,7 @@ class TradingAgent:
             equity=after.equity,
             prices=valuation_prices,
             strategy_name=self.strategy.name,
+            news_error=news_error,
             strategy_error=strategy_error,
             research=self.last_research,
         )

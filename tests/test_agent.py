@@ -7,8 +7,18 @@ from datetime import datetime, timedelta, timezone
 from itrader.agent import TradingAgent
 from itrader.broker import SimulatedBroker
 from itrader.models import NewsArticle, ResearchReport, Side
-from itrader.providers import StaticMarketDataProvider, StaticNewsProvider
+from itrader.providers import (
+    BestEffortNewsProvider,
+    ProviderError,
+    StaticMarketDataProvider,
+    StaticNewsProvider,
+)
 from itrader.strategy import NewsMomentumStrategy
+
+
+class FailingNewsProvider:
+    def fetch(self) -> list[NewsArticle]:
+        raise ProviderError("RSS unavailable")
 
 
 class TradingAgentTests(unittest.TestCase):
@@ -82,6 +92,16 @@ class TradingAgentTests(unittest.TestCase):
         self.assertEqual(report.trades[0].quantity, 11)  # 10% of $11,000 equity
         self.assertEqual(report.equity, 11_000)
         self.assertEqual(broker.snapshot(report.prices).equity, report.equity)
+
+    def test_best_effort_news_error_is_exposed_in_cycle_report(self) -> None:
+        agent = self._agent()
+        agent.news_provider = BestEffortNewsProvider(FailingNewsProvider())
+
+        report = agent.run_cycle(now=self.now)
+
+        self.assertEqual(report.articles_seen, 0)
+        self.assertEqual(report.news_error, "RSS unavailable")
+        self.assertIsNone(report.strategy_error)
 
     def test_state_round_trip(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

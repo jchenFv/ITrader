@@ -91,6 +91,8 @@ def _print_report(report: CycleReport) -> None:
         )
     for rejection in report.rejected:
         print(f"  SKIP {rejection}")
+    if report.news_error:
+        print(f"  NEWS WARNING {report.news_error}")
     if report.strategy_error:
         print(f"  FALLBACK {report.strategy_error}")
     if report.research:

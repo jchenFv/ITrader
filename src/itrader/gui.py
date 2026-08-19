@@ -523,6 +523,10 @@ class TradingDashboard(tk.Tk):
         )
         if report.rejected:
             self.status_var.set(self.status_var.get() + f" · 跳过 {len(report.rejected)} 个信号")
+        if report.news_error:
+            self.status_dot.configure(fg=AMBER)
+            self.status_var.set(self.status_var.get() + " · RSS 新闻源失败，已继续运行")
+            self.news_var.set(self.news_var.get() + f" · RSS 警告：{report.news_error}")
         if report.strategy_error:
             self.status_dot.configure(fg=AMBER)
             self.status_var.set(self.status_var.get() + " · LLM 失败，已使用规则回退")
