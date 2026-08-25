@@ -26,6 +26,23 @@ class MarketDataProvider(Protocol):
     def get_quotes(self, symbols: Sequence[str]) -> dict[str, Quote]: ...
 
 
+class BestEffortNewsProvider:
+    """Return no seed headlines when RSS fails so web-research strategies can continue."""
+
+    def __init__(self, provider: NewsProvider) -> None:
+        self.provider = provider
+        self.last_error: str | None = None
+
+    def fetch(self) -> list[NewsArticle]:
+        try:
+            articles = self.provider.fetch()
+            self.last_error = None
+            return articles
+        except ProviderError as exc:
+            self.last_error = str(exc)
+            return []
+
+
 def _get(url: str, timeout: float) -> bytes:
     request = Request(url, headers={"User-Agent": DEFAULT_USER_AGENT})
     try:
@@ -138,4 +155,3 @@ class StaticMarketDataProvider:
             for symbol in symbols
             if symbol.upper() in self.prices
         }
-

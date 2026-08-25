@@ -6,9 +6,19 @@ from datetime import datetime, timedelta, timezone
 
 from itrader.agent import TradingAgent
 from itrader.broker import SimulatedBroker
-from itrader.models import NewsArticle, Side
-from itrader.providers import StaticMarketDataProvider, StaticNewsProvider
+from itrader.models import NewsArticle, ResearchReport, Side
+from itrader.providers import (
+    BestEffortNewsProvider,
+    ProviderError,
+    StaticMarketDataProvider,
+    StaticNewsProvider,
+)
 from itrader.strategy import NewsMomentumStrategy
+
+
+class FailingNewsProvider:
+    def fetch(self) -> list[NewsArticle]:
+        raise ProviderError("RSS unavailable")
 
 
 class TradingAgentTests(unittest.TestCase):
@@ -83,11 +93,29 @@ class TradingAgentTests(unittest.TestCase):
         self.assertEqual(report.equity, 11_000)
         self.assertEqual(broker.snapshot(report.prices).equity, report.equity)
 
+    def test_best_effort_news_error_is_exposed_in_cycle_report(self) -> None:
+        agent = self._agent()
+        agent.news_provider = BestEffortNewsProvider(FailingNewsProvider())
+
+        report = agent.run_cycle(now=self.now)
+
+        self.assertEqual(report.articles_seen, 0)
+        self.assertEqual(report.news_error, "RSS unavailable")
+        self.assertIsNone(report.strategy_error)
+
     def test_state_round_trip(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "state.json"
             agent = self._agent(path)
             agent.run_cycle(now=self.now)
+            agent.last_research = ResearchReport(
+                generated_at=self.now,
+                model="test-model",
+                market_summary="test summary",
+                industry_views=(),
+                recommendations=(),
+            )
+            agent.save_state()
             payload = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(payload["schema_version"], 1)
 
@@ -98,6 +126,7 @@ class TradingAgentTests(unittest.TestCase):
                 strategy=NewsMomentumStrategy(watchlist={"NVDA": ("nvidia",)}),
             )
             self.assertEqual(loaded.broker.positions["NVDA"].quantity, 10)
+            self.assertEqual(loaded.last_research.model, "test-model")
             self.assertEqual(len(loaded.run_cycle(now=self.now).trades), 0)
 
 

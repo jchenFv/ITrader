@@ -5,9 +5,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import math
 import re
-from typing import Iterable, Mapping
+from typing import Iterable, Mapping, Protocol
 
-from .models import NewsArticle, PortfolioSnapshot, Quote, Side, TradeIntent
+from .models import NewsArticle, PortfolioSnapshot, Quote, ResearchReport, Side, TradeIntent
 
 
 DEFAULT_WATCHLIST: dict[str, tuple[str, ...]] = {
@@ -80,6 +80,45 @@ class RiskConfig:
             raise ValueError("news_half_life_hours must be positive")
 
 
+class TradingStrategy(Protocol):
+    watchlist: dict[str, tuple[str, ...]]
+    risk: RiskConfig
+    name: str
+    last_research: ResearchReport | None
+    last_error: str | None
+
+    def evaluate(
+        self,
+        articles: Iterable[NewsArticle],
+        quotes: Mapping[str, Quote],
+        portfolio: PortfolioSnapshot,
+        *,
+        now: datetime | None = None,
+    ) -> list[TradeIntent]: ...
+
+
+def risk_exit_intents(
+    quotes: Mapping[str, Quote],
+    portfolio: PortfolioSnapshot,
+    risk: RiskConfig,
+) -> list[TradeIntent]:
+    intents: list[TradeIntent] = []
+    for symbol, position in portfolio.positions.items():
+        quote = quotes.get(symbol)
+        if not quote:
+            continue
+        return_fraction = quote.price / position.average_cost - 1
+        if return_fraction <= -risk.stop_loss_fraction:
+            intents.append(
+                TradeIntent(symbol, Side.SELL, -10.0, f"stop loss ({return_fraction:.1%})")
+            )
+        elif return_fraction >= risk.take_profit_fraction:
+            intents.append(
+                TradeIntent(symbol, Side.SELL, -9.0, f"take profit ({return_fraction:.1%})")
+            )
+    return intents
+
+
 class NewsMomentumStrategy:
     """Transparent headline scoring plus position-level exits."""
 
@@ -91,6 +130,9 @@ class NewsMomentumStrategy:
     ) -> None:
         self.watchlist = dict(watchlist or DEFAULT_WATCHLIST)
         self.risk = risk or RiskConfig()
+        self.name = "rules"
+        self.last_research: ResearchReport | None = None
+        self.last_error: str | None = None
 
     def evaluate(
         self,
@@ -116,20 +158,7 @@ class NewsMomentumStrategy:
                     scores[symbol] += sentiment * weight
                     evidence[symbol].append(article.title)
 
-        intents: list[TradeIntent] = []
-        for symbol, position in portfolio.positions.items():
-            quote = quotes.get(symbol)
-            if not quote:
-                continue
-            return_fraction = quote.price / position.average_cost - 1
-            if return_fraction <= -self.risk.stop_loss_fraction:
-                intents.append(
-                    TradeIntent(symbol, Side.SELL, -10.0, f"stop loss ({return_fraction:.1%})")
-                )
-            elif return_fraction >= self.risk.take_profit_fraction:
-                intents.append(
-                    TradeIntent(symbol, Side.SELL, -9.0, f"take profit ({return_fraction:.1%})")
-                )
+        intents = risk_exit_intents(quotes, portfolio, self.risk)
 
         exiting = {intent.symbol for intent in intents}
         for symbol, score in scores.items():
@@ -162,4 +191,3 @@ class NewsMomentumStrategy:
     def _mentions(text: str, symbol: str, aliases: tuple[str, ...]) -> bool:
         terms = (*aliases, f"${symbol.lower()}")
         return any(re.search(rf"(?<!\w){re.escape(term)}(?!\w)", text) for term in terms)
-

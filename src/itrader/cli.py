@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timedelta, timezone
 import logging
+import os
 from pathlib import Path
 import time
 
@@ -10,16 +11,46 @@ from .agent import CycleReport, TradingAgent
 from .broker import SimulatedBroker
 from .models import NewsArticle
 from .providers import (
+    BestEffortNewsProvider,
     GoogleNewsRssProvider,
     ProviderError,
     StaticMarketDataProvider,
     StaticNewsProvider,
     YahooFinanceMarketData,
 )
+from .llm_strategy import (
+    DEFAULT_API_BASE,
+    DEFAULT_LLM_MODEL,
+    ResearchError,
+    build_strategy,
+)
 from .strategy import NewsMomentumStrategy
 
 
 LOG = logging.getLogger("itrader")
+
+
+def _add_strategy_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--strategy",
+        choices=("auto", "llm", "rules"),
+        default="auto",
+        help="auto uses LLM when OPENAI_API_KEY is set; llm requires it",
+    )
+    parser.add_argument(
+        "--llm-model",
+        default=os.getenv("ITRADER_LLM_MODEL", DEFAULT_LLM_MODEL),
+    )
+    parser.add_argument(
+        "--llm-confidence",
+        type=float,
+        default=0.70,
+        help="minimum LLM confidence for a candidate trade",
+    )
+    parser.add_argument(
+        "--openai-api-base",
+        default=os.getenv("OPENAI_BASE_URL", DEFAULT_API_BASE),
+    )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -32,6 +63,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--interval", type=int, default=300, help="poll interval in seconds")
     run.add_argument("--once", action="store_true", help="run exactly one cycle")
     run.add_argument("--news-query", default="US technology stocks when:1d")
+    _add_strategy_arguments(run)
 
     demo = subparsers.add_parser("demo", help="run a deterministic offline demonstration")
     demo.add_argument("--initial-cash", type=float, default=100_000)
@@ -41,6 +73,7 @@ def _parser() -> argparse.ArgumentParser:
     gui.add_argument("--state", type=Path, default=Path("var/paper-state.json"))
     gui.add_argument("--interval", type=int, default=300, help="auto-refresh interval in seconds")
     gui.add_argument("--news-query", default="US technology stocks when:1d")
+    _add_strategy_arguments(gui)
     return parser
 
 
@@ -48,7 +81,8 @@ def _print_report(report: CycleReport) -> None:
     print(
         f"[{report.timestamp.isoformat()}] news={report.new_articles}/{report.articles_seen} "
         f"quotes={report.quotes_received} trades={len(report.trades)} "
-        f"cash=${report.cash:,.2f} equity=${report.equity:,.2f}"
+        f"cash=${report.cash:,.2f} equity=${report.equity:,.2f} "
+        f"strategy={report.strategy_name}"
     )
     for trade in report.trades:
         print(
@@ -57,12 +91,24 @@ def _print_report(report: CycleReport) -> None:
         )
     for rejection in report.rejected:
         print(f"  SKIP {rejection}")
+    if report.news_error:
+        print(f"  NEWS WARNING {report.news_error}")
+    if report.strategy_error:
+        print(f"  FALLBACK {report.strategy_error}")
+    if report.research:
+        print(f"  RESEARCH {report.research.market_summary[:240]}")
 
 
 def _live_agent(args: argparse.Namespace) -> TradingAgent:
-    news = GoogleNewsRssProvider(query=args.news_query)
+    strategy = build_strategy(
+        args.strategy,
+        model=args.llm_model,
+        api_base=args.openai_api_base,
+        confidence_threshold=args.llm_confidence,
+    )
+    rss = GoogleNewsRssProvider(query=args.news_query)
+    news = BestEffortNewsProvider(rss) if getattr(strategy, "uses_web_research", False) else rss
     market = YahooFinanceMarketData()
-    strategy = NewsMomentumStrategy()
     if args.state.exists():
         return TradingAgent.load(
             args.state, news_provider=news, market_data=market, strategy=strategy
@@ -77,11 +123,15 @@ def _live_agent(args: argparse.Namespace) -> TradingAgent:
 
 
 def _run_live(args: argparse.Namespace) -> int:
-    agent = _live_agent(args)
+    try:
+        agent = _live_agent(args)
+    except ValueError as exc:
+        LOG.error("configuration error: %s", exc)
+        return 2
     while True:
         try:
             _print_report(agent.run_cycle())
-        except ProviderError as exc:
+        except (ProviderError, ResearchError) as exc:
             LOG.error("data provider error: %s", exc)
             if args.once:
                 return 2
@@ -130,12 +180,20 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "gui":
         from .gui import launch_gui
 
-        launch_gui(
-            initial_cash=args.initial_cash,
-            state_path=args.state,
-            interval_seconds=args.interval,
-            news_query=args.news_query,
-        )
+        try:
+            launch_gui(
+                initial_cash=args.initial_cash,
+                state_path=args.state,
+                interval_seconds=args.interval,
+                news_query=args.news_query,
+                strategy_mode=args.strategy,
+                llm_model=args.llm_model,
+                llm_confidence=args.llm_confidence,
+                api_base=args.openai_api_base,
+            )
+        except ValueError as exc:
+            LOG.error("configuration error: %s", exc)
+            return 2
         return 0
     return _run_live(args)
 
